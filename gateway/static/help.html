@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>LLM Gateway · Help & Free Keys</title>
+<title>LLM Gateway · Help & Providers</title>
 <style>
   :root {
     --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9;
@@ -42,7 +42,7 @@
 </header>
 <main>
 
-<p>This service routes LLM calls across <strong>seven free providers</strong>, with automatic failover, rate-limit tracking, persistent logging, and a manual override. Below: how to use it, what each provider offers, and how to get free keys.</p>
+<p>This service routes LLM calls across <strong>configured providers</strong>, with automatic failover, rate-limit tracking, persistent logging, and a manual override. Below: how to use it, what each provider offers, and how to configure free or paid tiers.</p>
 
 <h2>Using the gateway</h2>
 
@@ -90,6 +90,7 @@ for chunk in llm.stream("count to 5"):
   <li>Best models: <code>gemini-3.1-pro-preview</code>, <code>gemini-3.1-flash-lite-preview</code> <span class="star">★ default</span>, <code>gemini-2.5-flash</code>, <code>gemini-2.5-pro</code></li>
   <li>Context: <strong>1M tokens in / 65K out</strong></li>
   <li>Free tier (Flash-Lite): ~15 RPM · 250K TPM · 1,000 RPD</li>
+  <li>Paid tier limits vary by project, model, and AI Studio usage tier. Copy RPM, TPM, and RPD into <code>GEMINI_RPM</code>, <code>GEMINI_TPM</code>, and <code>GEMINI_RPD</code>.</li>
   <li>Pro models: 5 RPM · 25 RPD <span class="warn">(very tight)</span></li>
 </ul>
 <p><b>Get a key:</b></p>
@@ -146,8 +147,9 @@ for chunk in llm.stream("count to 5"):
 
 <h3>5. OpenRouter <span class="badge">one key, many models</span></h3>
 <ul>
-  <li>24 free models with <code>:free</code> suffix. Best:
-    <code>nvidia/nemotron-3-super-120b-a12b:free</code> <span class="star">★ default</span> (262K ctx),
+  <li>Paid models omit the <code>:free</code> suffix. The configured paid default is <code>deepseek/deepseek-v4-flash</code>.</li>
+  <li>Free models use the <code>:free</code> suffix. Examples:
+    <code>nvidia/nemotron-3-super-120b-a12b:free</code>,
     <code>nousresearch/hermes-3-llama-3.1-405b:free</code>,
     <code>qwen/qwen3-next-80b-a3b-instruct:free</code> (262K),
     <code>openai/gpt-oss-120b:free</code>,
@@ -156,6 +158,7 @@ for chunk in llm.stream("count to 5"):
   </li>
   <li>Free tier: <strong>20 RPM · 50 RPD per free model</strong> (200 RPD if you've ever added $10 credit)</li>
   <li>Free models share a daily pool — switching models doesn't reset</li>
+  <li>Paid non-free models default to no local gateway RPM/RPD cap; upstream <code>429</code> responses still trigger backoff.</li>
 </ul>
 <p><b>Get a key:</b></p>
 <ol>
@@ -210,7 +213,7 @@ for chunk in llm.stream("count to 5"):
   <tr><td>Groq</td><td>llama-3.3-70b-versatile</td><td>30</td><td>1,000</td><td>6K TPM · 500K tok/day</td></tr>
   <tr><td>NVIDIA NIM</td><td>deepseek-ai/deepseek-v3.2</td><td>40</td><td>—</td><td>1K credits on signup</td></tr>
   <tr><td>Gemini</td><td>gemini-3.1-flash-lite-preview</td><td>15</td><td>1,000</td><td>250K TPM · 1M ctx</td></tr>
-  <tr><td>OpenRouter</td><td>nvidia/nemotron-3-super-120b-a12b:free</td><td>20</td><td>50</td><td>per model · pooled</td></tr>
+  <tr><td>OpenRouter</td><td>deepseek/deepseek-v4-flash</td><td>configured</td><td>configured</td><td>free suffix keeps free-model caps</td></tr>
   <tr><td>GitHub Models</td><td>openai/gpt-4.1-mini</td><td>10–15</td><td>50–150</td><td>8K in / 4K out per req</td></tr>
 </table>
 
@@ -218,6 +221,9 @@ for chunk in llm.stream("count to 5"):
 <p>The gateway reads from <code>EAGV3/.env</code>. All keys are optional — providers without keys are skipped.</p>
 <pre><code>GEMINI_API_KEY=...
 GEMINI_MODEL=gemini-3.1-flash-lite-preview
+GEMINI_RPM=4000
+GEMINI_TPM=4000000
+GEMINI_RPD=150000
 
 NVIDIA_API_KEY=...
 NVIDIA_MODEL=deepseek-ai/deepseek-v3.2
@@ -229,7 +235,10 @@ CEREBRAS_API_KEY=...
 CEREBRAS_MODEL=zai-glm-4.7
 
 OPEN_ROUTER_API_KEY=...
-OPENROUTER_MODEL=nvidia/nemotron-3-super-120b-a12b:free
+OPENROUTER_MODEL=deepseek/deepseek-v4-flash
+OPENROUTER_TIER=paid
+OPENROUTER_RPM=
+OPENROUTER_RPD=
 
 GITHUB_ACCESS_TOKEN=...
 GITHUB_MODEL=openai/gpt-4.1-mini
@@ -239,6 +248,15 @@ OLLAMA_MODEL=gemma4:31b
 
 LLM_ORDER=ollama,gemini,nvidia,groq,cerebras,openrouter,github
 GATEWAY_PORT=8099</code></pre>
+
+<h2>Paid-tier rate limits</h2>
+<ul>
+  <li>Gateway defaults stay conservative for free-tier users.</li>
+  <li>Gemini limits are project/model/tier quotas, not API-key properties. Read them in AI Studio and set <code>GEMINI_RPM</code>, <code>GEMINI_TPM</code>, and <code>GEMINI_RPD</code>.</li>
+  <li>OpenRouter startup checks <code>/api/v1/key</code> when possible. Set <code>OPENROUTER_TIER=paid</code> to skip detection.</li>
+  <li>Any provider limit set to <code>0</code> is shown as uncapped locally; real upstream <code>429</code> errors still put that provider into backoff.</li>
+  <li>Cooldown is derived from RPM, so raising RPM automatically removes old free-tier pacing.</li>
+</ul>
 
 <h2>HTTP API reference</h2>
 <table>

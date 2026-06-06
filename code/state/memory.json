@@ -2469,5 +2469,23 @@
     "goal_id": null,
     "confidence": 1.0,
     "created_at": "2026-06-06T09:46:15.312780"
+  },
+  {
+    "id": "mem:20ad7d24",
+    "kind": "fact",
+    "keywords": [
+      "hello"
+    ],
+    "descriptor": "hello",
+    "value": {
+      "raw": "hello"
+    },
+    "artifact_id": null,
+    "embedding": null,
+    "source": "user_query",
+    "run_id": "s8-70065bc8",
+    "goal_id": null,
+    "confidence": 1.0,
+    "created_at": "2026-06-06T10:32:45.544128"
   }
 ]

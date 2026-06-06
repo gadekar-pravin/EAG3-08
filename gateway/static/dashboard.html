@@ -58,7 +58,7 @@
   <h1>⚡ LLM Gateway <span style="color:var(--accent)">V7</span> <span class="badge" id="port-badge"></span></h1>
   <nav>
     <a href="/">Dashboard</a>
-    <a href="/help">Help / Free Keys</a>
+    <a href="/help">Help / Providers</a>
     <a href="/v1/capabilities">API: capabilities</a>
     <a href="/v1/providers">API: providers</a>
     <a href="/v1/routers">API: routers</a>
@@ -126,6 +126,12 @@ function barClass(used, limit) {
   if (p > 0.6) return 'warn';
   return '';
 }
+function limitLabel(used, limit) {
+  return limit > 0 ? `${used} / ${limit}` : `${used} / uncapped`;
+}
+function limitPct(used, limit) {
+  return limit > 0 ? Math.min(100, used / limit * 100) : 0;
+}
 function capPills(caps) {
   const items = [['tools','tools'],['caching','cache'],['reasoning','think'],['structured','struct'],['parallel_tools','parallel']];
   return items.map(([k,label]) => `<span class="pill ${caps[k] ? 'cap' : 'capx'}">${label}</span>`).join('');
@@ -161,12 +167,12 @@ async function refresh() {
       <div class="model">${s.model}</div>
       <div class="caps-row">${capPills(caps)}</div>
       <div style="margin-top:10px;">
-        <div class="row"><span>RPM</span><b>${s.rpm_used} / ${s.rpm_limit}</b></div>
-        <div class="bar"><div class="${barClass(s.rpm_used, s.rpm_limit)}" style="width:${Math.min(100, s.rpm_used/s.rpm_limit*100)}%"></div></div>
+        <div class="row"><span>RPM</span><b>${limitLabel(s.rpm_used, s.rpm_limit)}</b></div>
+        <div class="bar"><div class="${barClass(s.rpm_used, s.rpm_limit)}" style="width:${limitPct(s.rpm_used, s.rpm_limit)}%"></div></div>
       </div>
       <div style="margin-top:8px;">
-        <div class="row"><span>RPD</span><b>${s.rpd_used} / ${s.rpd_limit}</b></div>
-        <div class="bar"><div class="${barClass(s.rpd_used, s.rpd_limit)}" style="width:${Math.min(100, s.rpd_used/s.rpd_limit*100)}%"></div></div>
+        <div class="row"><span>RPD</span><b>${limitLabel(s.rpd_used, s.rpd_limit)}</b></div>
+        <div class="bar"><div class="${barClass(s.rpd_used, s.rpd_limit)}" style="width:${limitPct(s.rpd_used, s.rpd_limit)}%"></div></div>
       </div>
       <div class="row" style="margin-top:10px;">
         <span class="stat">calls today <b>${today.calls || 0}</b></span>
@@ -212,12 +218,12 @@ async function refreshRouters() {
       <div class="name">${name} <span class="pill cap">router</span>${cdLeft}${boLeft}</div>
       <div class="model">${s.model}</div>
       <div style="margin-top:10px;">
-        <div class="row"><span>RPM</span><b>${s.rpm_used} / ${s.rpm_limit}</b></div>
-        <div class="bar"><div class="${barClass(s.rpm_used, s.rpm_limit)}" style="width:${Math.min(100, s.rpm_used/s.rpm_limit*100)}%"></div></div>
+        <div class="row"><span>RPM</span><b>${limitLabel(s.rpm_used, s.rpm_limit)}</b></div>
+        <div class="bar"><div class="${barClass(s.rpm_used, s.rpm_limit)}" style="width:${limitPct(s.rpm_used, s.rpm_limit)}%"></div></div>
       </div>
       <div style="margin-top:8px;">
-        <div class="row"><span>RPD</span><b>${s.rpd_used} / ${s.rpd_limit}</b></div>
-        <div class="bar"><div class="${barClass(s.rpd_used, s.rpd_limit)}" style="width:${Math.min(100, s.rpd_used/s.rpd_limit*100)}%"></div></div>
+        <div class="row"><span>RPD</span><b>${limitLabel(s.rpd_used, s.rpd_limit)}</b></div>
+        <div class="bar"><div class="${barClass(s.rpd_used, s.rpd_limit)}" style="width:${limitPct(s.rpd_used, s.rpd_limit)}%"></div></div>
       </div>
       <div class="row" style="margin-top:10px;">
         <span class="stat">routing calls today <b>${today.calls || 0}</b></span>

@@ -19,7 +19,7 @@ for _candidate in (ROOT / ".env", ROOT.parent / ".env"):
 
 import db
 import providers as P
-from router import Router, RouterPool, DEFAULT_ROUTER_ORDER, LIMITS, SHORTCUTS, resolve
+from router import Router, RouterPool, DEFAULT_ROUTER_ORDER, LIMITS, SHORTCUTS, resolve, refresh_openrouter_limits_from_key
 from cache import GeminiCache
 from schemas import ChatRequest, ChatResponse, ToolCall, RouterDecision, EmbedRequest, EmbedResponse, BatchChatRequest
 import embedders as E
@@ -200,6 +200,7 @@ async def lifespan(app: FastAPI):
     db.init()
     app.state.cache = GeminiCache(ttl_seconds=300)
     app.state.providers = P.build_providers(app.state.cache)
+    await refresh_openrouter_limits_from_key(app.state.providers.get("openrouter"))
     app.state.router = Router(app.state.providers, ORDER)
     app.state.router_providers = P.build_router_providers()
     app.state.router_pool = RouterPool(app.state.router_providers, ROUTER_ORDER)

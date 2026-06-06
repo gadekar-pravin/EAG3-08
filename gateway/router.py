@@ -1,18 +1,21 @@
-"""Capability-aware router. Same RPM/RPD bookkeeping as V1, but now it can
-skip providers that lack a requested capability (tools/reasoning/structured/caching)."""
+"""Capability-aware router with configurable provider rate budgets."""
 from __future__ import annotations
-import time, asyncio
+import os, time, asyncio
 from collections import deque, defaultdict
+from copy import deepcopy
+from typing import Mapping
+
+import httpx
 
 
-LIMITS = {
-    "ollama":     {"rpm": 9999, "rpd": 9999999, "tpm": 99999999, "cooldown": 0,   "max_ctx": 32000},
-    "cerebras":   {"rpm": 30,   "rpd": 9999,    "tpm": 60000,    "cooldown": 2,   "max_ctx": 8000,    "tokens_per_day": 1_000_000},
-    "groq":       {"rpm": 30,   "rpd": 1000,    "tpm": 6000,     "cooldown": 2,   "max_ctx": 100000},
-    "nvidia":     {"rpm": 40,   "rpd": 9999,    "tpm": 100000,   "cooldown": 2,   "max_ctx": 100000},
-    "gemini":     {"rpm": 15,   "rpd": 1000,    "tpm": 250000,   "cooldown": 4,   "max_ctx": 1000000},
-    "openrouter": {"rpm": 20,   "rpd": 50,      "tpm": 99999999, "cooldown": 3,   "max_ctx": 100000},
-    "github":     {"rpm": 10,   "rpd": 50,      "tpm": 99999999, "cooldown": 6,   "max_ctx": 8000},
+DEFAULT_LIMITS = {
+    "ollama":     {"rpm": 0,    "rpd": 0,       "tpm": 0,        "max_ctx": 32000},
+    "cerebras":   {"rpm": 30,   "rpd": 9999,    "tpm": 60000,    "max_ctx": 8000,    "tokens_per_day": 1_000_000},
+    "groq":       {"rpm": 30,   "rpd": 1000,    "tpm": 6000,     "max_ctx": 100000},
+    "nvidia":     {"rpm": 40,   "rpd": 9999,    "tpm": 100000,   "max_ctx": 100000},
+    "gemini":     {"rpm": 15,   "rpd": 1000,    "tpm": 250000,   "max_ctx": 1000000},
+    "openrouter": {"rpm": 20,   "rpd": 50,      "tpm": 99999999, "max_ctx": 100000},
+    "github":     {"rpm": 10,   "rpd": 50,      "tpm": 99999999, "max_ctx": 8000},
 }
 
 SHORTCUTS = {
@@ -24,6 +27,106 @@ SHORTCUTS = {
     "or": "openrouter", "opr": "openrouter", "openrouter": "openrouter",
     "gh": "github", "ghb": "github", "github": "github",
 }
+
+
+def _env_int(env: Mapping[str, str], name: str, default: int) -> int:
+    raw = env.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return int(raw.replace("_", ""))
+
+
+def _env_flag(env: Mapping[str, str], name: str) -> bool | None:
+    raw = (env.get(name) or "").strip().lower()
+    if raw in {"1", "true", "yes", "paid", "payg", "pay-as-you-go"}:
+        return True
+    if raw in {"0", "false", "no", "free"}:
+        return False
+    return None
+
+
+def _apply_numeric_overrides(limits: dict[str, dict], env: Mapping[str, str], provider: str) -> None:
+    prefix = provider.upper()
+    for field in ("rpm", "rpd", "tpm", "max_ctx", "tokens_per_day"):
+        env_name = f"{prefix}_{field.upper()}"
+        if env_name in env:
+            limits[provider][field] = _env_int(env, env_name, limits[provider].get(field, 0))
+
+
+def _add_cooldowns(limits: dict[str, dict]) -> dict[str, dict]:
+    for provider_limits in limits.values():
+        rpm = provider_limits.get("rpm", 0)
+        provider_limits["cooldown"] = 0 if rpm <= 0 else 60 / rpm
+    return limits
+
+
+def load_limits(env: Mapping[str, str] | None = None, *, openrouter_paid: bool | None = None) -> dict[str, dict]:
+    """Return provider rate budgets, applying env overrides.
+
+    A zero RPM/RPD/TPM means "do not enforce that local cap"; upstream 429
+    handling still applies. Defaults remain conservative free-tier budgets.
+    """
+    env = os.environ if env is None else env
+    limits = deepcopy(DEFAULT_LIMITS)
+
+    for provider in limits:
+        _apply_numeric_overrides(limits, env, provider)
+
+    tier_flag = _env_flag(env, "OPENROUTER_TIER")
+    if tier_flag is not None:
+        openrouter_paid = tier_flag
+
+    openrouter_model = (env.get("OPENROUTER_MODEL") or "").strip().lower()
+    openrouter_free_model = openrouter_model.endswith(":free")
+    if openrouter_paid and not openrouter_free_model:
+        # Paid OpenRouter non-free models do not have a useful local platform
+        # RPD/RPM ceiling. Let upstream 429/backoff police real capacity unless
+        # the operator has supplied explicit caps.
+        if "OPENROUTER_RPM" not in env or env.get("OPENROUTER_RPM", "").strip() == "":
+            limits["openrouter"]["rpm"] = 0
+        if "OPENROUTER_RPD" not in env or env.get("OPENROUTER_RPD", "").strip() == "":
+            limits["openrouter"]["rpd"] = 0
+        limits["openrouter"]["limit_source"] = "paid"
+    else:
+        limits["openrouter"]["limit_source"] = "free"
+
+    if openrouter_free_model:
+        limits["openrouter"]["limit_source"] = "free-model"
+
+    return _add_cooldowns(limits)
+
+
+LIMITS = load_limits()
+
+
+def refresh_limits(*, openrouter_paid: bool | None = None) -> None:
+    """Refresh the global LIMITS mapping without replacing the dict object."""
+    LIMITS.clear()
+    LIMITS.update(load_limits(openrouter_paid=openrouter_paid))
+
+
+async def refresh_openrouter_limits_from_key(provider) -> None:
+    """Optionally introspect OpenRouter account tier at startup.
+
+    Gemini does not expose a similarly reliable key-level tier endpoint; those
+    limits stay operator-configured from AI Studio.
+    """
+    tier_flag = _env_flag(os.environ, "OPENROUTER_TIER")
+    if tier_flag is not None:
+        refresh_limits(openrouter_paid=tier_flag)
+        return
+    if provider is None or not getattr(provider, "api_key", ""):
+        refresh_limits()
+        return
+    try:
+        headers = {"Authorization": f"Bearer {provider.api_key}"}
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get("https://openrouter.ai/api/v1/key", headers=headers)
+        response.raise_for_status()
+        data = response.json().get("data") or {}
+        refresh_limits(openrouter_paid=not bool(data.get("is_free_tier", True)))
+    except Exception:
+        refresh_limits()
 
 
 def resolve(name):
@@ -65,17 +168,22 @@ class RateState:
         now = time.time()
         if now < self.unavailable_until:
             return False, f"backoff: {self.unavailable_reason} ({self.unavailable_until - now:.0f}s left)"
-        wait = limits["cooldown"] - (now - self.last_call)
+        cooldown = limits.get("cooldown", 0)
+        wait = cooldown - (now - self.last_call)
         if wait > 0:
             return False, f"cooldown ({wait:.1f}s)"
-        if len(self.calls_minute) >= limits["rpm"]:
+        rpm = limits.get("rpm", 0)
+        if rpm > 0 and len(self.calls_minute) >= rpm:
             return False, "RPM limit"
-        if self.calls_today >= limits["rpd"]:
+        rpd = limits.get("rpd", 0)
+        if rpd > 0 and self.calls_today >= rpd:
             return False, "RPD limit"
         tpm = sum(t for _, t in self.tokens_minute)
-        if tpm + est_tokens > limits["tpm"]:
+        tpm_limit = limits.get("tpm", 0)
+        if tpm_limit > 0 and tpm + est_tokens > tpm_limit:
             return False, "TPM limit"
-        if "tokens_per_day" in limits and self.tokens_today + est_tokens > limits["tokens_per_day"]:
+        tokens_per_day = limits.get("tokens_per_day", 0)
+        if tokens_per_day > 0 and self.tokens_today + est_tokens > tokens_per_day:
             return False, "daily token cap"
         return True, None
 
@@ -104,10 +212,12 @@ class RateState:
             "tpm_limit": limits["tpm"],
             "tokens_today": self.tokens_today,
             "tokens_per_day": limits.get("tokens_per_day"),
-            "cooldown_remaining": max(0, limits["cooldown"] - (now - self.last_call)) if self.last_call else 0,
+            "cooldown_remaining": max(0, limits.get("cooldown", 0) - (now - self.last_call)) if self.last_call else 0,
+            "cooldown_s": limits.get("cooldown", 0),
             "last_call": self.last_call,
             "backoff_remaining": max(0, self.unavailable_until - now),
             "backoff_reason": self.unavailable_reason if now < self.unavailable_until else "",
+            "limit_source": limits.get("limit_source"),
         }
 
 
@@ -135,7 +245,7 @@ class Router:
                 if missing:
                     attempts.append({"provider": name, "reason": f"skipped:no_{missing[0]}"})
                     continue
-            if est_tokens > limits["max_ctx"]:
+            if limits.get("max_ctx", 0) > 0 and est_tokens > limits["max_ctx"]:
                 attempts.append({"provider": name, "reason": f"prompt {est_tokens} > max_ctx {limits['max_ctx']}"})
                 continue
             ok, why = self.state[name].can_use(limits, est_tokens)

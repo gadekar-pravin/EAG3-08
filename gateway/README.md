@@ -79,7 +79,7 @@ GATEWAY_V7_PORT=8107
 
 ### Rate limits and backoff
 
-The gateway defends Gemini's free tier with three rules. Ollama is local and uncapped.
+The gateway defaults defend Gemini's free tier with conservative local caps. Paid-tier limits are explicit configuration: copy the current model/project quotas from AI Studio into the `GEMINI_RPM`, `GEMINI_TPM`, and `GEMINI_RPD` env vars. Ollama is local and uncapped.
 
 | Provider | RPM           | Cooldown between calls | On failure (429 / 5xx)                       |
 |----------|---------------|------------------------|----------------------------------------------|
@@ -380,14 +380,14 @@ If you want exact tokenization, override `_estimate_tokens()` in [main.py](main.
 
 Same seven providers as V2; two default models changed:
 
-| Shortcut | Provider | Default model (V3) | Free tier (RPM / RPD) |
+| Shortcut | Provider | Default model (V3) | Local cap source |
 |---|---|---|---|
 | `o`, `oll` | Ollama (local) | env-controlled (e.g. `gemma4:31b`) | unlimited |
-| `g`, `gem` | Gemini | `gemini-3.1-flash-lite` | 15 / 1,000 |
+| `g`, `gem` | Gemini | `gemini-3.1-flash-lite` | free default, or `GEMINI_RPM` / `GEMINI_RPD` / `GEMINI_TPM` |
 | `n`, `nv` | NVIDIA NIM | `deepseek-ai/deepseek-v3.2` | 40 / — |
 | `gr` | Groq | **`openai/gpt-oss-120b`** *(was `llama-3.3-70b-versatile` in V2)* | 30 / 1,000 |
 | `c`, `cer` | Cerebras | **`zai-glm-4.7`** *(was `qwen-3-235b-a22b-instruct-2507`)* | 30 / — (1M tokens/day, 8K ctx cap) |
-| `or`, `opr` | OpenRouter | `nvidia/nemotron-3-super-120b-a12b:free` | 20 / 50 (per free model) |
+| `or`, `opr` | OpenRouter | `deepseek/deepseek-v4-flash` | free-model caps for `:free`; paid non-free can be locally uncapped |
 | `gh`, `ghb` | GitHub Models | `openai/gpt-4.1-mini` | 10–15 / 50–150, 8K in / 4K out |
 
 **Why the two changes:**
@@ -430,6 +430,9 @@ Edit `EAGV3/.env` (or `../.env` relative to the gateway dir):
 # Worker provider keys — same as V1/V2
 GEMINI_API_KEY=...
 GEMINI_MODEL=gemini-3.1-flash-lite
+GEMINI_RPM=4000
+GEMINI_TPM=4000000
+GEMINI_RPD=150000
 
 NVIDIA_API_KEY=...
 NVIDIA_MODEL=deepseek-ai/deepseek-v3.2
@@ -441,7 +444,10 @@ CEREBRAS_API_KEY=...
 CEREBRAS_MODEL=zai-glm-4.7                  # V3 default (was qwen-3-235b-a22b-instruct-2507)
 
 OPEN_ROUTER_API_KEY=...
-OPENROUTER_MODEL=nvidia/nemotron-3-super-120b-a12b:free
+OPENROUTER_MODEL=deepseek/deepseek-v4-flash
+OPENROUTER_TIER=paid                  # optional; otherwise the gateway tries /api/v1/key
+OPENROUTER_RPM=                       # empty/0 = no local RPM cap for paid non-free models
+OPENROUTER_RPD=                       # empty/0 = no local RPD cap for paid non-free models
 
 GITHUB_ACCESS_TOKEN=...
 GITHUB_MODEL=openai/gpt-4.1-mini
@@ -463,6 +469,14 @@ GATEWAY_V3_PORT=8101
 ```
 
 Any router provider whose `*_API_KEY` is missing is silently skipped — V3 still works with whatever subset of router providers is available. If all four router keys are missing, every auto-routed call falls back to the deterministic token-count rule.
+
+### Paid-tier rate-limit configuration
+
+Gateway defaults stay free-tier safe. For paid keys:
+
+- **Gemini:** limits are project/model/tier quotas, not API-key properties. Read them in AI Studio and set `GEMINI_RPM`, `GEMINI_TPM`, and `GEMINI_RPD`. Cooldown is derived from RPM, so raising RPM automatically removes old free-tier pacing.
+- **OpenRouter:** at startup the gateway calls `https://openrouter.ai/api/v1/key` when possible. If the key is paid and the model does not end with `:free`, local RPM/RPD caps default to `0` (uncapped) unless you set `OPENROUTER_RPM` or `OPENROUTER_RPD`.
+- **All providers:** upstream `429` responses still trigger provider backoff. A local cap of `0` only disables the gateway's preemptive cap; it does not ignore upstream rate limits.
 
 ---
 
@@ -546,7 +560,7 @@ The dashboard shows worker pool and router pool side-by-side, with router activi
 - **V2 and V3 use separate DB files.** `gateway_v2.db` and `gateway_v3.db` don't share schema or data. Run them on ports 8100/8101 simultaneously without conflict.
 - **The token estimator (`words × 1.4`) is wrong for code, CJK, and base64.** That's by design — the router's content sample lets the LLM router upgrade the tier when the count number lied. If you need exact tokenization for some other reason, override `_estimate_tokens()` in [main.py](main.py).
 - **GitHub Models hard-caps every request at 8K input / 4K output.** This affects both the worker (Phi-4-mini-instruct for routing has the same cap) and any GitHub worker calls. For LARGE-tier work on GitHub, you may hit the 8K input cap before you hit the 8,000-token routing threshold.
-- **OpenRouter `:free` models share a 50 RPD pool.** OpenRouter is in the worker pool but **not** the router pool for this reason — using it as a router would burn the same daily quota as worker calls.
+- **OpenRouter `:free` models keep free-model caps.** OpenRouter is in the worker pool but **not** the router pool for this reason — using it as a router would burn the same daily quota as worker calls. Paid non-free models should omit the `:free` suffix.
 - **`cache_system=true` is a paid-tier feature on Gemini.** Free-tier keys silently ignore it — context caching (both implicit and explicit) is only available to paid users. Setting it on a free key does no harm but also gives no savings; the examples above are for paid keys.
 - **Gemini 3 models loop or degrade at low temperature.** Google's own guidance is to keep `temperature` near `1.0` for Gemini 3.x; setting it to `0` can cause runaway token loops (e.g. `"id": "g:1,1,1,1,..."`) on schema-constrained calls. If you need determinism, use a worker on Groq/Cerebras with `temperature=0` instead, or accept Gemini at `temperature≈1.0`.
 - **The four router slots in the pool all share quotas across the same API key when the worker uses the same provider.** Concretely: Groq's router (`llama-3.3-70b-versatile`) and Groq's worker (`openai/gpt-oss-120b`) are two **separate** per-model RPM buckets, so they don't compete. The Cerebras router (`llama3.1-8b`) and Cerebras worker (`zai-glm-4.7`) are also separate per-model. But the **daily token quota** on Cerebras (`tokens_per_day: 1_000_000`) is account-wide, so both router and worker draw from it.
