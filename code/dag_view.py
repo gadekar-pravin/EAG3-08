@@ -22,11 +22,11 @@ from __future__ import annotations
 from io import StringIO
 
 import networkx as nx
-from rich.align import Align
 from rich.box import ROUNDED
 from rich.columns import Columns
 from rich.console import Console, Group
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 # status → (glyph, rich colour). Unknown/absent statuses fall back to _FALLBACK.
@@ -42,6 +42,7 @@ _STATUS: dict[str, tuple[str, str]] = {
 _FALLBACK = ("?", "white")
 
 _FRAME = "bright_black"  # subtle colour for panel borders and connectors
+_GUTTER = "cyan"
 
 
 def _node_sort_key(nid: str) -> tuple[int, str]:
@@ -111,27 +112,57 @@ def _node_panel(graph: nx.DiGraph, nid: str) -> Panel:
     )
 
 
-def _wave_row(graph: nx.DiGraph, wave: list[str]) -> Group:
-    """A centred row of boxed nodes — one parallel wave — captioned with the
-    wave's wall-clock total (the slowest node, since they ran concurrently)."""
-    row = Align.center(Columns([_node_panel(graph, nid) for nid in wave],
-                               padding=(0, 2), expand=False))
-    total = _wave_total(graph, wave)
-    if total is None:
-        return Group(row)
-    caption = Align.center(
-        Text(f"wave total {total}  (parallel wall-clock)", style="bright_black"))
-    return Group(row, caption)
+def _status_legend() -> Text:
+    """Compact legend for the top summary, kept in one line for scanability."""
+    legend = Text("status ", style="bright_black")
+    for status in ("complete", "failed", "skipped", "running", "pending"):
+        glyph, colour = _STATUS[status]
+        legend.append(glyph, style=f"bold {colour}")
+        legend.append(f" {status}  ", style="bright_black")
+    return legend
 
 
-def _connector(graph: nx.DiGraph, upper: list[str], lower: list[str]) -> Align:
-    """Centred downward arrows for one wave boundary: one ▼ per edge that
+def _wave_gutter(index: int, wave: list[str], total: str | None) -> Text:
+    """Left-hand metadata for one executor wave."""
+    count = len(wave)
+    node_word = "node" if count == 1 else "nodes"
+    gutter = Text()
+    gutter.append(f"Wave {index}", style=f"bold {_GUTTER}")
+    gutter.append(f"\n{count} {node_word}", style="bright_black")
+    if total is not None:
+        gutter.append(f"\n{total} wall", style="green")
+    else:
+        gutter.append("\n— wall", style="bright_black")
+    return gutter
+
+
+def _wave_row(graph: nx.DiGraph, wave: list[str], index: int) -> Table:
+    """One wave in a two-column grid: metadata gutter + parallel node cards."""
+    row = Table.grid(expand=True, padding=(0, 2))
+    row.add_column(width=14, justify="right")
+    row.add_column(ratio=1)
+    nodes = Columns(
+        [_node_panel(graph, nid) for nid in wave],
+        padding=(0, 1),
+        expand=False,
+        equal=False,
+    )
+    row.add_row(_wave_gutter(index, wave, _wave_total(graph, wave)), nodes)
+    return row
+
+
+def _connector(graph: nx.DiGraph, upper: list[str], lower: list[str]) -> Table:
+    """Compact connector row for one wave boundary: one ▼ per edge that
     actually crosses from the upper wave into the lower wave, so a fan-out
     (1→N) and a fan-in (N→1) both read as N arrows and a 1→1 step as one."""
     lower_set = set(lower)
     crossing = sum(1 for u in upper for v in graph.successors(u) if v in lower_set)
     arrows = "   ".join(["▼"] * max(1, crossing))
-    return Align.center(Text(arrows, style=f"bold {_FRAME}"))
+    row = Table.grid(expand=True, padding=(0, 2))
+    row.add_column(width=14)
+    row.add_column(ratio=1)
+    row.add_row(Text("│", style=_FRAME), Text(arrows, style=f"bold {_FRAME}"))
+    return row
 
 
 def _build(graph: nx.DiGraph):
@@ -156,15 +187,15 @@ def _build(graph: nx.DiGraph):
     header.append("Execution DAG", style="bold")
     header.append(
         f"   {n_nodes} nodes · {n_edges} edges · {len(waves)} waves"
-        "   (same row = ran in parallel)",
+        "   (one wave = ran in parallel)",
         style="bright_black",
     )
 
-    blocks: list = [Align.center(header), Text()]
-    for i, wave in enumerate(waves):
-        blocks.append(_wave_row(graph, wave))
-        if i < len(waves) - 1:
-            blocks.append(_connector(graph, wave, waves[i + 1]))
+    blocks: list = [header, _status_legend(), Text()]
+    for i, wave in enumerate(waves, start=1):
+        blocks.append(_wave_row(graph, wave, i))
+        if i < len(waves):
+            blocks.append(_connector(graph, wave, waves[i]))
 
     return Panel(
         Group(*blocks),

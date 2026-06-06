@@ -35,12 +35,21 @@ def test_header_reports_counts_and_waves():
     out = format_dag(_fanout_graph(), plain=True)
     assert "Execution DAG" in out
     assert "5 nodes · 6 edges · 3 waves" in out
-    assert "(same row = ran in parallel)" in out
+    assert "(one wave = ran in parallel)" in out
+
+
+def test_header_includes_status_legend():
+    out = format_dag(_fanout_graph(), plain=True)
+    assert "status" in out
+    for glyph in ("✓", "✗", "⊘", "…", "·"):
+        assert glyph in out
 
 
 def test_parallel_wave_renders_three_boxes_and_fanout_arrows():
     out = format_dag(_fanout_graph(), plain=True)
-    # all three researchers are boxed side by side on the parallel wave
+    assert "Wave 2" in out
+    assert "3 nodes" in out
+    # all three researchers are boxed on the parallel wave
     assert out.count("researcher") == 3
     # one ▼ per fan-out target → three arrows under the planner
     assert "▼   ▼   ▼" in out
@@ -66,13 +75,16 @@ def test_wave_total_is_parallel_wall_clock_not_sum():
     for nid, secs in (("n:2", 19.1), ("n:3", 17.3), ("n:4", 13.5)):
         g.nodes[nid]["result"] = {"elapsed_s": secs}
     out = format_dag(g, plain=True)
-    assert "wave total 19.1s" in out      # max(19.1, 17.3, 13.5)
+    assert "19.1s wall" in out            # max(19.1, 17.3, 13.5)
+    assert "wave total" not in out        # totals live in the left gutter now
     assert "49.9s" not in out             # the (wrong) sum must not appear
 
 
-def test_wave_total_absent_when_no_timing():
-    # no node carries a result → nothing to total, so no caption is rendered
-    assert "wave total" not in format_dag(_fanout_graph(), plain=True)
+def test_wave_gutter_marks_missing_timing():
+    # no node carries a result → no wall-clock total can be computed
+    out = format_dag(_fanout_graph(), plain=True)
+    assert "— wall" in out
+    assert "wave total" not in out
 
 
 def test_edge_panel_is_gone():
@@ -108,6 +120,16 @@ def test_failed_status_glyph():
     g = nx.DiGraph()
     g.add_node("n:1", skill="researcher", status="failed")
     assert "✗" in format_dag(g, plain=True)
+
+
+def test_all_known_status_glyphs_render_on_nodes():
+    g = nx.DiGraph()
+    statuses = ["complete", "failed", "skipped", "running", "pending"]
+    for i, status in enumerate(statuses, start=1):
+        g.add_node(f"n:{i}", skill="researcher", status=status)
+    out = format_dag(g, plain=True)
+    for glyph in ("✓", "✗", "⊘", "…", "·"):
+        assert glyph in out
 
 
 def test_empty_graph_does_not_crash():
