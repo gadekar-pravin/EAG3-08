@@ -27,6 +27,7 @@ import os
 import re
 from pathlib import Path
 
+import httpx
 from pydantic import BaseModel, Field
 
 from gateway import LLM, embed as _gateway_embed, ensure_gateway
@@ -44,6 +45,7 @@ STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
 # Kinds for which an embedding is computed at write time. Scratchpad items
 # are run-scoped and skip the vector path.
 _EMBEDDABLE_KINDS = {"fact", "preference", "tool_outcome"}
+_EMBED_WARNING_EMITTED: set[str] = set()
 
 
 # ── persistence ─────────────────────────────────────────────────────────────
@@ -82,14 +84,44 @@ def _index() -> VectorIndex:
     return idx
 
 
-def _try_embed(text: str, task_type: str) -> list[float] | None:
+def _embed_failure_summary(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        response = exc.response
+        request = exc.request
+        status = response.status_code
+        path = request.url.path or "/v1/embed"
+        detail = ""
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                detail_obj = payload.get("detail") or payload.get("error")
+                detail = str(detail_obj) if detail_obj else ""
+        except Exception:
+            detail = response.text.strip()
+        base = f"{status} from {path}"
+        return f"{base}: {detail[:160]}" if detail else base
+    return type(exc).__name__
+
+
+def _warn_embed_unavailable(operation: str, exc: Exception) -> None:
+    if operation in _EMBED_WARNING_EMITTED:
+        return
+    _EMBED_WARNING_EMITTED.add(operation)
+    suffix = f" ({_embed_failure_summary(exc)})"
+    if operation == "read":
+        print(f"[memory] embedding unavailable; using keyword fallback{suffix}")
+    else:
+        print(f"[memory] embedding unavailable; saved item without vector{suffix}")
+
+
+def _try_embed(text: str, task_type: str, *, operation: str) -> list[float] | None:
     """Compute an embedding via the gateway. Returns None if the gateway is
     unavailable. The caller decides whether to persist a non-embedded item."""
     try:
         resp = _gateway_embed(text, task_type=task_type)
         return list(resp["embedding"])
     except Exception as e:
-        print(f"[memory] embedding failed ({e!r}); item written without vector")
+        _warn_embed_unavailable(operation, e)
         return None
 
 
@@ -141,7 +173,7 @@ def _vector_search(
     kinds: list[str] | None,
     top_k: int,
 ) -> list[MemoryItem]:
-    qvec = _try_embed(query, task_type="retrieval_query")
+    qvec = _try_embed(query, task_type="retrieval_query", operation="read")
     if qvec is None:
         return []
     idx = _index()
@@ -211,7 +243,7 @@ def _fallback_remember(
     a vector and stays reachable through the keyword fallback."""
     toks = list(_tokens(raw_text))[:10]
     descriptor = raw_text[:200]
-    embedding = _try_embed(descriptor, task_type="retrieval_document")
+    embedding = _try_embed(descriptor, task_type="retrieval_document", operation="write")
     item = MemoryItem(
         id=new_id("mem"),
         kind="fact",
@@ -262,7 +294,11 @@ def remember(
 
     embedding: list[float] | None = None
     if c.kind in _EMBEDDABLE_KINDS:
-        embedding = _try_embed(c.descriptor, task_type="retrieval_document")
+        embedding = _try_embed(
+            c.descriptor,
+            task_type="retrieval_document",
+            operation="write",
+        )
 
     item = MemoryItem(
         id=new_id("mem"),
@@ -334,7 +370,7 @@ def record_outcome(
     else:
         descriptor += result_text[:120].replace("\n", " ")
 
-    embedding = _try_embed(descriptor, task_type="retrieval_document")
+    embedding = _try_embed(descriptor, task_type="retrieval_document", operation="write")
 
     item = MemoryItem(
         id=new_id("mem"),
@@ -366,7 +402,7 @@ def add_fact(
 ) -> MemoryItem:
     """Direct fact write used by document-indexing tools. Skips the LLM
     classifier (kind is known) but still embeds the descriptor."""
-    embedding = _try_embed(descriptor, task_type="retrieval_document")
+    embedding = _try_embed(descriptor, task_type="retrieval_document", operation="write")
     item = MemoryItem(
         id=new_id("mem"),
         kind="fact",

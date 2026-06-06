@@ -96,6 +96,7 @@ class EmbedResponse(BaseModel):
     dim: int
     latency_ms: int = 0
     attempted: list[dict[str, Any]] = Field(default_factory=list)
+    retries: int = 0
 
 
 class ChatResponse(BaseModel):

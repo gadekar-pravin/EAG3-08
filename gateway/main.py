@@ -605,7 +605,7 @@ async def embed(req: EmbedRequest):
 
     t0 = time.time()
     try:
-        name, result, attempts, latency = await E.embed_with_failover(
+        name, result, attempts, latency, retries = await E.embed_with_failover(
             embedders, req.text, req.task_type, explicit=req.provider
         )
     except E.EmbedderError as e:
@@ -639,6 +639,7 @@ async def embed(req: EmbedRequest):
         attempted=_attempts_str(attempts),
         call_role="embed",
         embed_dim=result["dim"],
+        retries=retries,
     )
     return EmbedResponse(
         provider=name,
@@ -647,6 +648,7 @@ async def embed(req: EmbedRequest):
         dim=result["dim"],
         latency_ms=latency,
         attempted=attempts,
+        retries=retries,
     ).model_dump()
 
 

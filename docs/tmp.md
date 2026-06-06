@@ -77,3 +77,7 @@ uv run python flow.py -v "Read /Users/pravin/Documents/bad�name.txt and tell m
 
 uv run python flow.py -v "For Lagos, Cairo, and Kinshasa, find current populations and growth rates and tell me which is growing fastest."
 uv run python flow.py -v --resume s8-e54bae3c
+
+----
+uv run python flow.py "Controlled critic fail demo: First extract an IPL auction player card only from this inline source text and render the card. Source text: player_name=Jasprit Bumrah; primary_role=fast bowler and death-overs specialist; recent_form_score=9; match_impact_score=10; role_scarcity_score=9; price_efficiency_score=6; estimated_price_crore=11; auction_risk=fitness status not provided. The source intentionally omits fitness_score; do not infer or invent fitness_score from auction_risk or any outside knowledge."
+
