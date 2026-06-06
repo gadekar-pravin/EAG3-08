@@ -86,6 +86,7 @@ def test_planner_prompt_contains_generic_auction_dag_contract() -> None:
     assert "do not use a fixed player list" in PLANNER_MD
     assert "N independent `researcher` nodes, one per player" in PLANNER_MD
     assert "one `distiller` node with inputs from all player researcher labels" in PLANNER_MD
+    assert "one `coder` node with inputs from USER_QUERY and the distiller label" in PLANNER_MD
     assert 'one `auction_strategist` node with input from the coder label' in PLANNER_MD
     assert '`coder` -> `auction_strategist` -> `formatter`' in PLANNER_MD
     assert "Do NOT emit `sandbox_executor`; Coder has a static internal successor" in PLANNER_MD
@@ -149,6 +150,7 @@ def test_offline_contract_supports_arbitrary_players() -> None:
     assert "Travis Head" in PLANNER_MD
     assert "Axar Patel" in PLANNER_MD
     assert "inputs\":[\"n:kohli\",\"n:head\",\"n:patel\"]" in PLANNER_MD
+    assert '"skill":"coder","inputs":["USER_QUERY","n:player_cards"]' in PLANNER_MD
     assert "verify best two-player purchase under the USER_QUERY budget" in PLANNER_MD
     assert "`recommended_buy`, `total_estimated_spend_crore`, pair score" in STRATEGIST_MD
     assert "actual player names from\n    that output" in STRATEGIST_MD

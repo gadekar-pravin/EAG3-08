@@ -47,7 +47,7 @@ do not use a fixed player list. Emit this DAG shape:
   1. N independent `researcher` nodes, one per player, all with
      `inputs:["USER_QUERY"]`;
   2. one `distiller` node with inputs from all player researcher labels;
-  3. one `coder` node with input from the distiller label;
+  3. one `coder` node with inputs from USER_QUERY and the distiller label;
   4. one `auction_strategist` node with input from the coder label;
   5. one `formatter` node with input from the auction_strategist label.
 Do NOT emit `sandbox_executor`; Coder has a static internal successor.
@@ -179,7 +179,7 @@ Generic auction strategy example:
     "metadata":{"label":"patel","question":"Axar Patel IPL auction profile: primary role, recent form, injury or fitness risk, match impact, role scarcity, price efficiency, estimated auction value"}},
    {"skill":"distiller","inputs":["n:kohli","n:head","n:patel"],
     "metadata":{"label":"player_cards","question":"extract required auction player-card fields for the requested players"}},
-   {"skill":"coder","inputs":["n:player_cards"],
+   {"skill":"coder","inputs":["USER_QUERY","n:player_cards"],
     "metadata":{"label":"auction_math","question":"verify best two-player purchase under the USER_QUERY budget using player_cards scores and prices"}},
    {"skill":"auction_strategist","inputs":["n:auction_math"],
     "metadata":{"label":"auction_strategy","question":"convert verified auction math into the structured two-player strategy"}},
