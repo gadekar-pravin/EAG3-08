@@ -98,12 +98,11 @@ def _format_hits(hits: list[MemoryItem]) -> str:
             raw = val.get("raw")
             chunk = val.get("chunk")
             if isinstance(raw, str) and raw.strip():
-                raw_more = "…" if len(raw) > 2000 else ""
-                line += f"\n      raw: {raw[:2000]}{raw_more}"
+                line += f"\n      raw: {raw[:200]}"
             elif isinstance(chunk, str) and chunk.strip():
                 src = val.get("source") or ""
-                preview = chunk[:2000].replace("\n", " ")
-                more = "…" if len(chunk) > 2000 else ""
+                preview = chunk[:600].replace("\n", " ")
+                more = "…" if len(chunk) > 600 else ""
                 line += f"\n      chunk ({src}): {preview}{more}"
             else:
                 compact = {

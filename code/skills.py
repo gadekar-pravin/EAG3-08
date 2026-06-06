@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 
@@ -134,39 +135,61 @@ def _format_memory_hits(hits: list) -> str:
         if source:
             line += f"\n      source: {source}"
         if isinstance(chunk, str) and chunk.strip():
-            preview = chunk[:2000].replace("\n", " ")
-            more = " …" if len(chunk) > 2000 else ""
+            preview = chunk[:400].replace("\n", " ")
+            more = " …" if len(chunk) > 400 else ""
             line += f"\n      chunk: {preview}{more}"
         elif isinstance(raw, str) and raw.strip():
-            raw_more = " …" if len(raw) > 2000 else ""
-            line += f"\n      raw: {raw[:2000]}{raw_more}"
+            line += f"\n      raw: {raw[:200]}"
         lines.append(line)
     return "\n".join(lines)
+
+
+_URL_RE = re.compile(r"https?://[^\s<>\]\)\"']+")
+
+
+def _extract_explicit_urls(query: str, resolved: list[dict],
+                           node_question: str | None = None) -> list[str]:
+    """Find user-supplied URLs so web skills can prefer exact fetches."""
+    candidates: list[str] = [query]
+    if node_question:
+        candidates.append(node_question)
+    for item in resolved:
+        if item.get("kind") == "literal" and isinstance(item.get("value"), str):
+            candidates.append(item["value"])
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    for text in candidates:
+        for match in _URL_RE.findall(text or ""):
+            url = match.rstrip(".,;:")
+            if url and url not in seen:
+                urls.append(url)
+                seen.add(url)
+    return urls
 
 
 def render_prompt(skill: Skill, query: str, resolved: list[dict],
                   failure_report: str | None = None,
                   memory_hits: list | None = None,
-                  question: str | None = None) -> str:
+                  node_question: str | None = None) -> str:
     parts = [skill.prompt_template().rstrip()]
     # USER_QUERY top-line: only when the Planner wired USER_QUERY into this
-    # node's inputs. Earlier versions added it unconditionally, which
-    # leaked the full original query into every fan-out worker — three
-    # researcher siblings spawned to "find population of A / B / C" all
-    # saw the same "compare A, B, C" query and each one ended up
-    # searching for all three. Per-node scoping now travels through
-    # `metadata.question` (rendered as QUESTION below) and the INPUTS
+    # node's inputs. Emitting it unconditionally leaks the full original query
+    # into every fan-out worker — three researcher siblings spawned to "find
+    # population of A / B / C" would all see the same "compare A, B, C" query
+    # and each end up searching for all three. Per-node scoping travels through
+    # `metadata.question` (rendered as NODE QUESTION below) and the INPUTS
     # block; USER_QUERY is present only when the Planner asked for it.
     user_query_in_inputs = any(
         isinstance(r, dict) and r.get("id") == "USER_QUERY" for r in resolved
     )
     if user_query_in_inputs:
         parts += ["", f"USER_QUERY: {query}"]
-    # QUESTION: the per-node sub-question the Planner attached via
-    # `metadata.question`. This is how a fan-out worker learns *its*
-    # slice of the user's request without seeing the whole query.
-    if isinstance(question, str) and question.strip():
-        parts += ["", f"QUESTION: {question.strip()}"]
+    # A node's own metadata.question is its narrow sub-task (e.g. one city in a
+    # per-item fan-out). Surfacing it focuses the skill on its slice instead of
+    # re-answering the whole USER_QUERY.
+    if node_question:
+        parts += ["", f"NODE QUESTION: {node_question}"]
     if failure_report:
         parts += ["", f"FAILURE:\n{failure_report}"]
     # Memory hits — FAISS-ranked MemoryItems from session-start memory.read.
@@ -175,6 +198,9 @@ def render_prompt(skill: Skill, query: str, resolved: list[dict],
     hits_block = _format_memory_hits(memory_hits or [])
     if hits_block:
         parts += ["", f"MEMORY HITS ({len(memory_hits)} from FAISS):", hits_block]
+    explicit_urls = _extract_explicit_urls(query, resolved, node_question)
+    if explicit_urls:
+        parts += ["", "EXPLICIT_URLS:", "\n".join(f"  - {url}" for url in explicit_urls)]
     parts += ["", "INPUTS:", json.dumps(resolved, indent=2, default=str)[:20_000]]
     return "\n".join(parts)
 
@@ -264,15 +290,9 @@ async def run_skill(skill: Skill, node_id: str, graph_nodes,
     skills are LLM-backed and route through the V8 gateway with
     agent=<skill_name> so agent_routing.yaml + cost-by-agent kick in."""
     resolved = resolve_inputs(graph_nodes[node_id]["inputs"], graph_nodes, query)
-    # Per-node sub-question from the Planner's `metadata.question`. Travels
-    # into the rendered prompt as a QUESTION: block so a fan-out worker
-    # (e.g. one of three researchers spawned to cover three cities) can
-    # see *its* slice of the user's request even when USER_QUERY is not
-    # in its inputs.
-    node_meta = graph_nodes[node_id].get("metadata") or {}
-    question = node_meta.get("question") if isinstance(node_meta, dict) else None
+    node_question = (graph_nodes[node_id].get("metadata") or {}).get("question")
     rendered = render_prompt(skill, query, resolved, failure_report,
-                             memory_hits=memory_hits, question=question)
+                             memory_hits=memory_hits, node_question=node_question)
     started = time.time()
 
     if skill.name == "sandbox_executor":
@@ -353,6 +373,26 @@ async def run_skill(skill: Skill, node_id: str, graph_nodes,
             elapsed_s=time.time() - started,
             provider=reply.get("provider", ""),
             error=err,
+        ), rendered
+
+    # A non-sandbox skill that returns neither parseable output nor any
+    # successors did no useful work. The usual triggers are intermittent: the
+    # tool-use loop hit MAX_TOOL_HOPS with no final text, or the model replied
+    # with prose instead of the contracted JSON. Reporting success here is the
+    # silent-failure bug — the empty result flows downstream (e.g. a formatter
+    # that then answers "no data") and the keyword recovery path never runs.
+    # Fail instead, with an upstream_failure-classified message (no transient /
+    # "malformed" markers) so plan_recovery() re-plans rather than skips.
+    # Safe for the planner: its `parsed` keeps the un-popped `nodes` key, and a
+    # non-empty `successors` short-circuits this check regardless.
+    if not parsed and not successors:
+        return AgentResult(
+            success=False, agent_name=skill.name,
+            output=parsed,
+            elapsed_s=time.time() - started,
+            provider=reply.get("provider", ""),
+            error=f"{skill.name} produced no usable output "
+                  f"(empty result and no successors)",
         ), rendered
 
     return AgentResult(

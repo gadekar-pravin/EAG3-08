@@ -26,6 +26,7 @@ Executor level, not a more clever client here.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -63,7 +64,17 @@ async def run_with_tools(*, prompt: str, tools_payload: list[dict],
     messages: list[dict] = [{"role": "user", "content": prompt}]
     last_reply: dict = {}
 
-    server_params = StdioServerParameters(command=sys.executable, args=[str(MCP_SERVER)])
+    # Forward S8_STATE_DIR so the MCP server (a separate process that indexes
+    # fetched content) writes to the same isolated state dir as the parent.
+    # The stdio client strips custom env vars by default, merging only
+    # server.env over a safe whitelist — so we pass it explicitly when set.
+    # Unset → env=None → identical to the default (whitelist-only) environment.
+    _state_dir = os.environ.get("S8_STATE_DIR")
+    server_params = StdioServerParameters(
+        command=sys.executable,
+        args=[str(MCP_SERVER)],
+        env={"S8_STATE_DIR": _state_dir} if _state_dir else None,
+    )
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as mcp:
             await mcp.initialize()

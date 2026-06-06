@@ -6,6 +6,7 @@
 code/state/sessions/*/
 !code/state/sessions/.gitkeep
 code/state/*.json
+code/state/index.faiss
 code/usage.json
 code/sandbox/*.txt
 code/.venv/

@@ -23,6 +23,7 @@ Three honest design choices flagged in the Session 7 notes:
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -32,7 +33,12 @@ from gateway import LLM, embed as _gateway_embed, ensure_gateway
 from schemas import MemoryItem, ToolCall, new_id
 from vector_index import VectorIndex
 
-STATE_PATH = Path(__file__).parent / "state" / "memory.json"
+# State dir is overridable via S8_STATE_DIR so tests can isolate the memory +
+# FAISS index per run (the e2e suite points this at a fresh temp dir). Unset =
+# the default on-disk location, i.e. production behaviour is unchanged.
+_DEFAULT_STATE_DIR = Path(__file__).parent / "state"
+_STATE_DIR = Path(os.environ["S8_STATE_DIR"]) if os.environ.get("S8_STATE_DIR") else _DEFAULT_STATE_DIR
+STATE_PATH = _STATE_DIR / "memory.json"
 STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # Kinds for which an embedding is computed at write time. Scratchpad items

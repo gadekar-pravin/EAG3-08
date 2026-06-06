@@ -22,10 +22,17 @@ import uuid
 
 import networkx as nx
 
+from dag_view import format_dag, format_node_log
 import memory as memory_svc
 from gateway import ensure_gateway
 from persistence import SessionStore
-from recovery import handle_critic_verdict, plan_recovery
+from recovery import (
+    MAX_RECOVERY_REPLANS,
+    MAX_TRANSIENT_RETRIES,
+    flatten_exception,
+    handle_critic_verdict,
+    plan_recovery,
+)
 from schemas import AgentResult, NodeState
 from skills import SkillRegistry, run_skill
 
@@ -104,7 +111,7 @@ class Graph:
         # the parent's full output (which for the Planner contains every
         # sibling's question) back into the worker's INPUTS block and undo
         # the scoping. The structural parent edge is preserved separately
-        # below so the graph topology is still correct.
+        # below (the `in_degree == 0` guard) so the graph topology stays correct.
         for new_id, raw_inputs in pending:
             resolved: list[str] = []
             for inp in raw_inputs:
@@ -139,28 +146,43 @@ class Graph:
             for inp in resolved:
                 if inp.startswith("n:") and inp in self.g.nodes:
                     self.g.add_edge(inp, new_id)
-            # Fan-out worker case: planner emitted inputs=[] on purpose. No
-            # data dependency, but we still record the structural parent
-            # edge so the executor's `ready_nodes` ordering and replay
-            # topology stay coherent.
-            if not raw_inputs:
+            # A spawned child can only run after the node that spawned it —
+            # the child literally does not exist until `src_nid` completes and
+            # extend_from runs. When its only inputs are USER_QUERY / art:
+            # handles (which carry no in-graph edge), encode that spawn
+            # dependency explicitly so the scheduler places it in a later wave
+            # and the DAG view renders the real execution order.
+            if self.g.in_degree(new_id) == 0:
                 self.g.add_edge(src_nid, new_id)
 
         for child_skill in src_def.internal_successors:
             nid = self.add_node(child_skill, inputs=[src_nid])
             added.append(nid)
 
-        # Critic auto-insertion: place a Critic before each newly-added
-        # child so the child only runs after Critic passes.
-        if src_def.critic and added:
-            for child_nid in list(added):
-                self.g.remove_edge(src_nid, child_nid)
-                critic_nid = self.add_node(
-                    "critic", inputs=[src_nid],
-                    metadata={"target": src_nid, "child": child_nid},
-                )
-                self.g.add_edge(critic_nid, child_nid)
-                added.append(critic_nid)
+        # Critic auto-insertion: any newly-created edge out of a `critic:true`
+        # skill is gated by a Critic. This includes sibling edges created by a
+        # Planner batch, e.g. researcher -> distiller -> formatter.
+        scan_sources = {src_nid, *added}
+        candidate_edges = [
+            (parent, child)
+            for parent, child in list(self.g.edges())
+            if parent in scan_sources and child in added
+        ]
+        for parent, child in candidate_edges:
+            parent_def = registry.get(self.g.nodes[parent]["skill"])
+            child_skill = self.g.nodes[child]["skill"]
+            if not parent_def.critic or child_skill == "critic":
+                continue
+            if not self.g.has_edge(parent, child):
+                continue
+
+            self.g.remove_edge(parent, child)
+            critic_nid = self.add_node(
+                "critic", inputs=[parent],
+                metadata={"target": parent, "child": child},
+            )
+            self.g.add_edge(critic_nid, child)
+            added.append(critic_nid)
 
         return added
 
@@ -173,7 +195,7 @@ class Executor:
         self.registry = registry or SkillRegistry()
 
     async def run(self, query: str, *, session_id: str | None = None,
-                  resume: bool = False) -> str:
+                  resume: bool = False, verbose: bool = False) -> str:
         sid = session_id or f"s8-{uuid.uuid4().hex[:8]}"
         store = SessionStore(sid)
         if resume:
@@ -218,6 +240,18 @@ class Executor:
         # no flag. Track every second-or-later critic-fail here so the
         # final log can surface it.
         critic_fail_cap_hit: list[str] = []
+        # Run-scoped budget on recovery re-plans (recovery.MAX_RECOVERY_REPLANS).
+        # Bounds a systematically-failing branch so it cannot keep spawning
+        # recovery Planners up to MAX_NODES; replan_cap_hit surfaces any failure
+        # we declined to retry so the thin final answer is explained, not silent.
+        replans_used = 0
+        replan_cap_hit: list[str] = []
+        # Per-node transient-retry counters (recovery.MAX_TRANSIENT_RETRIES). A
+        # 503'd node is re-run in place until it succeeds or the budget runs
+        # out; retry_cap_hit surfaces any node we gave up on so a downstream
+        # chain stranded by the still-failed node is explained, not silent.
+        transient_retries: dict[str, int] = {}
+        retry_cap_hit: list[str] = []
 
         while True:
             ready = graph.ready_nodes()
@@ -246,10 +280,12 @@ class Executor:
                     started_at=time.time() - result.elapsed_s,
                     completed_at=time.time(),
                 ))
-                print(f"[{nid}] {graph.g.nodes[nid]['skill']:18s} "
-                      f"{graph.g.nodes[nid]['status']:8s} "
-                      f"({result.elapsed_s:.1f}s)"
-                      + (f"  err={result.error[:80]}" if result.error else ""))
+                print(format_node_log(
+                    nid, graph.g.nodes[nid]["skill"], graph.g.nodes[nid]["status"],
+                    elapsed_s=result.elapsed_s, error=result.error,
+                    inputs=graph.g.nodes[nid]["inputs"], output=result.output,
+                    verbose=verbose,
+                ))
 
                 if result.success:
                     if graph.g.nodes[nid]["skill"] == "critic":
@@ -269,19 +305,47 @@ class Executor:
                         failed_skill=failed_skill,
                         error_text=result.error or "",
                         failed_node_id=nid,
+                        replans_used=replans_used,
+                        retries_used=transient_retries.get(nid, 0),
                     )
+                    if decision.action == "retry":
+                        # Re-run the SAME node next wave: reset to pending so
+                        # ready_nodes picks it up again. Its edges (and any
+                        # downstream nodes already wired to its id) are
+                        # preserved, so a successful retry unblocks them.
+                        transient_retries[nid] = transient_retries.get(nid, 0) + 1
+                        graph.mark(nid, "pending")
+                        print(f"  ↪ retry ({decision.reason}, "
+                              f"{transient_retries[nid]}/{MAX_TRANSIENT_RETRIES}): "
+                              f"re-running {nid} ({failed_skill}): {decision.note}")
+                        continue
                     if decision.action == "skip":
-                        print(f"  ↪ {nid} failed ({decision.reason}, "
-                              f"skill={failed_skill}): {decision.note}")
+                        if decision.budget_exhausted:
+                            replan_cap_hit.append(nid)
+                        if decision.retries_exhausted:
+                            retry_cap_hit.append(nid)
+                        # Give-up: mark the node "skipped" (not left "failed")
+                        # so nodes wired to its id can still run instead of
+                        # deadlocking forever on a "failed" predecessor. The
+                        # dependent renders this input via resolve_inputs as the
+                        # failed node's empty output ({}), so it proceeds with
+                        # the branch absent. Mirrors the critic-fail skip;
+                        # ready_nodes treats skipped as satisfied-but-absent.
+                        graph.mark(nid, "skipped")
+                        print(f"  ↪ {nid} skipped ({decision.reason}, "
+                              f"skill={failed_skill}): {decision.note}; "
+                              f"downstream sees this input as missing")
                         continue
                     # action == "replan"
+                    replans_used += 1
                     rec_nid = graph.add_node(
                         "planner", inputs=["USER_QUERY"],
                         metadata={"failure_report": decision.failure_report,
                                   "recovers": nid,
                                   "recovery_reason": decision.reason},
                     )
-                    print(f"  ↪ recovery ({decision.reason}): planner node "
+                    print(f"  ↪ recovery ({decision.reason}, "
+                          f"{replans_used}/{MAX_RECOVERY_REPLANS}): planner node "
                           f"{rec_nid} queued for {nid}")
 
             store.write_graph(graph.g)
@@ -303,6 +367,25 @@ class Executor:
                   f"The final answer reflects missing data from these "
                   f"branches because the Critic rejected the re-planned "
                   f"output too.")
+        if retry_cap_hit:
+            # A node that 503'd through all its in-place retries stays failed,
+            # so anything wired to its id never runs. Surface it loudly — the
+            # final answer is missing that branch (and its downstream chain).
+            print(f"\n[flow] WARNING: transient-retry budget "
+                  f"({MAX_TRANSIENT_RETRIES}) exhausted on {len(retry_cap_hit)} "
+                  f"node(s): {', '.join(retry_cap_hit)}. The gateway kept "
+                  f"returning transient errors; the final answer reflects "
+                  f"missing data from these branches and anything downstream.")
+        if replan_cap_hit:
+            # Same rationale as the critic-cap surface: a budget-exhausted
+            # failure leaves a branch un-recovered, so say so loudly rather
+            # than let the thin answer look complete.
+            print(f"\n[flow] WARNING: recovery replan budget "
+                  f"({MAX_RECOVERY_REPLANS}) exhausted; {len(replan_cap_hit)} "
+                  f"failed node(s) not retried: {', '.join(replan_cap_hit)}. "
+                  f"The final answer reflects missing data from these branches.")
+        print()
+        print(format_dag(graph.g))
         print(f"\n{'═' * 78}\nFINAL: {(formatter_answer or '')[:600]}\n{'═' * 78}\n")
         return formatter_answer or ""
 
@@ -319,7 +402,7 @@ class Executor:
                                              memory_hits=memory_hits)
         except Exception as e:  # pragma: no cover - dispatcher fault path
             result = AgentResult(success=False, agent_name=skill_name,
-                                 error=f"exception: {type(e).__name__}: {e}")
+                                 error=f"exception: {flatten_exception(e)}")
             prompt = "(exception before prompt-render)"
         return nid, result, prompt
 
@@ -328,13 +411,18 @@ class Executor:
 
 def main() -> None:
     args = sys.argv[1:]
+    verbose = False
+    if "--verbose" in args or "-v" in args:
+        verbose = True
+        args = [a for a in args if a not in ("--verbose", "-v")]
     resume_sid: str | None = None
     if args and args[0] == "--resume":
         resume_sid = args[1] if len(args) > 1 else None
         query = " ".join(args[2:])
     else:
         query = " ".join(args) or "Say hello in one short sentence."
-    asyncio.run(Executor().run(query, session_id=resume_sid, resume=bool(resume_sid)))
+    asyncio.run(Executor().run(query, session_id=resume_sid,
+                               resume=bool(resume_sid), verbose=verbose))
 
 
 if __name__ == "__main__":

@@ -84,6 +84,13 @@ coder:
   max_tokens: 1500
   description: STUB. Student assignment for Session 8. Emits Python code; the orchestrator hands it to sandbox_executor next.
 
+auction_strategist:
+  prompt: prompts/auction_strategist.md
+  tools_allowed: []
+  temperature: 0.3
+  max_tokens: 1200
+  description: Converts verified auction-combination output into a structured two-player purchase strategy.
+
 browser:
   prompt: prompts/browser.md
   temperature: 0.3

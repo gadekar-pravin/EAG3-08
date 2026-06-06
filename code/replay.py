@@ -20,6 +20,7 @@ import json
 import sys
 from pathlib import Path
 
+from dag_view import format_dag
 from persistence import SessionStore, list_sessions
 from schemas import NodeState
 
@@ -102,6 +103,11 @@ def replay(session_id: str) -> int:
             _expand_output(st)
             continue
         i += 1
+
+    g = store.read_graph()
+    if g is not None:
+        print()
+        print(format_dag(g))
     print("\n(end of session)")
     return 0
 
