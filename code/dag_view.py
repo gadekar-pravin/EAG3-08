@@ -29,20 +29,30 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-# status → (glyph, rich colour). Unknown/absent statuses fall back to _FALLBACK.
-# Every colour used here is a standard rich colour name (no grey-NN look-ups), so
-# this never raises a colour-parse error on an exotic terminal.
-_STATUS: dict[str, tuple[str, str]] = {
-    "complete": ("✓", "green"),
-    "failed":   ("✗", "red"),
-    "skipped":  ("⊘", "yellow"),
-    "running":  ("…", "cyan"),
-    "pending":  ("·", "bright_black"),
-}
-_FALLBACK = ("?", "white")
+# Truecolor (24-bit) palette tuned for contrast on a dark background. We use
+# explicit hex rather than the 16 named ANSI colours on purpose: named colours
+# are remapped by the terminal's theme (e.g. iTerm2 renders ANSI "green" as a
+# muddy olive on a teal background), whereas hex is rendered as-is. Rich
+# auto-downsamples hex to the nearest colour on non-truecolor terminals, so this
+# is still parse-safe everywhere — it never raises a colour-parse error.
+_COMPLETE = "#6BD6A6"  # mint green
+_FAILED   = "#F2777A"  # soft red
+_SKIPPED  = "#E6C07B"  # amber
+_RUNNING  = "#5FB0D9"  # sky blue
+_PENDING  = "#8AA1A4"  # slate
+_MUTED    = "#8AA1A4"  # readable subtle text (labels, timings, counts, meta)
+_FRAME    = "#5C7376"  # panel borders and connectors
+_GUTTER   = "#5FB0D9"  # wave index labels
 
-_FRAME = "bright_black"  # subtle colour for panel borders and connectors
-_GUTTER = "cyan"
+# status → (glyph, rich colour). Unknown/absent statuses fall back to _FALLBACK.
+_STATUS: dict[str, tuple[str, str]] = {
+    "complete": ("✓", _COMPLETE),
+    "failed":   ("✗", _FAILED),
+    "skipped":  ("⊘", _SKIPPED),
+    "running":  ("…", _RUNNING),
+    "pending":  ("·", _PENDING),
+}
+_FALLBACK = ("?", "#C9D5D6")
 
 
 def _node_sort_key(nid: str) -> tuple[int, str]:
@@ -96,10 +106,10 @@ def _node_panel(graph: nx.DiGraph, nid: str) -> Panel:
 
     body = Text(skill, style=f"bold {colour}")
     if isinstance(label, str) and label:
-        body.append(f"\n[{label}]", style="italic bright_black")
+        body.append(f"\n[{label}]", style=f"italic {_MUTED}")
     secs = _elapsed(graph, nid)
     if secs:
-        body.append(f"\n{secs}", style="bright_black")
+        body.append(f"\n{secs}", style=_MUTED)
 
     return Panel(
         body,
@@ -114,11 +124,11 @@ def _node_panel(graph: nx.DiGraph, nid: str) -> Panel:
 
 def _status_legend() -> Text:
     """Compact legend for the top summary, kept in one line for scanability."""
-    legend = Text("status ", style="bright_black")
+    legend = Text("status ", style=_MUTED)
     for status in ("complete", "failed", "skipped", "running", "pending"):
         glyph, colour = _STATUS[status]
         legend.append(glyph, style=f"bold {colour}")
-        legend.append(f" {status}  ", style="bright_black")
+        legend.append(f" {status}  ", style=_MUTED)
     return legend
 
 
@@ -128,11 +138,11 @@ def _wave_gutter(index: int, wave: list[str], total: str | None) -> Text:
     node_word = "node" if count == 1 else "nodes"
     gutter = Text()
     gutter.append(f"Wave {index}", style=f"bold {_GUTTER}")
-    gutter.append(f"\n{count} {node_word}", style="bright_black")
+    gutter.append(f"\n{count} {node_word}", style=_MUTED)
     if total is not None:
-        gutter.append(f"\n{total} wall", style="green")
+        gutter.append(f"\n{total} wall", style=_COMPLETE)
     else:
-        gutter.append("\n— wall", style="bright_black")
+        gutter.append("\n— wall", style=_MUTED)
     return gutter
 
 
@@ -170,7 +180,7 @@ def _build(graph: nx.DiGraph):
     ``format_dag`` (string) and ``render_dag`` (live console) share one layout."""
     n_nodes = graph.number_of_nodes()
     if n_nodes == 0:
-        return Text("DAG  ·  empty", style="bright_black")
+        return Text("DAG  ·  empty", style=_MUTED)
     n_edges = graph.number_of_edges()
 
     # Waves come from topological generations: each generation is one batch the
@@ -188,7 +198,7 @@ def _build(graph: nx.DiGraph):
     header.append(
         f"   {n_nodes} nodes · {n_edges} edges · {len(waves)} waves"
         "   (one wave = ran in parallel)",
-        style="bright_black",
+        style=_MUTED,
     )
 
     blocks: list = [header, _status_legend(), Text()]
@@ -232,8 +242,8 @@ def format_dag(graph: nx.DiGraph, *, plain: bool = False) -> str:
 
 # ── Live per-node log line ───────────────────────────────────────────────────
 
-_KEY_STYLE = "cyan"          # output-dict keys: the scannable anchors
-_LABEL_STYLE = "bright_black"  # in/out labels and node id
+_KEY_STYLE = _GUTTER         # output-dict keys: the scannable anchors
+_LABEL_STYLE = _MUTED        # in/out labels and node id
 
 
 def _preview_value(value) -> str:
@@ -291,7 +301,7 @@ def format_node_log(nid: str, skill: str, status: str, *,
     if elapsed_s and elapsed_s > 0:
         header.append(f" {elapsed_s:.1f}s", style=_LABEL_STYLE)
     if error:
-        header.append(f"  err={error[:80]}", style="red")
+        header.append(f"  err={error[:80]}", style=_FAILED)
 
     lines: list[Text] = [header]
     if verbose:
