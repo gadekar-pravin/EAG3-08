@@ -1,6 +1,7 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+This is the canonical shared agent guidance for this repository. Codex reads it directly;
+Claude Code imports it through `CLAUDE.md`.
 
 ## What this is
 
